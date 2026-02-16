@@ -62,6 +62,11 @@ class ClientMessage:
 # Your helper functions, variables, classes here. You may also write initialization routines to be called
 # when this script is first imported and anything else you wish.
 
+import itertools
+
+LOOKAHEAD = 5  # chunks to look ahead
+throughput_history = []
+prev_quality = 0
 
 def student_entrypoint(client_message: ClientMessage):
 	"""
@@ -84,4 +89,63 @@ def student_entrypoint(client_message: ClientMessage):
 
 	:return: float Your quality choice. Must be one in the range [0 ... quality_levels - 1] inclusive.
 	"""
-	return client_message.quality_levels - 1  # Let's see what happens if we select the highest bitrate every time
+	# return client_message.quality_levels - 1  # Let's see what happens if we select the highest bitrate every time
+
+	global throughput_history, prev_quality
+
+	quality_levels = client_message.quality_levels
+	buffer_secs = client_message.buffer_seconds_until_empty
+	buffer_max = client_message.buffer_max_size
+	chunk_duration = client_message.buffer_seconds_per_chunk
+	quality_bitrates = client_message.quality_bitrates
+	upcoming = client_message.upcoming_quality_bitrates
+	prev_throughput = client_message.previous_throughput
+	qual_coef = client_message.quality_coefficient
+	var_coef = client_message.variation_coefficient
+	rebuf_coef = client_message.rebuffering_coefficient
+
+	if prev_throughput > 0:
+		throughput_history.append(prev_throughput)
+	if len(throughput_history) == 0:
+		prev_quality = 0
+		return 0
+	recent = throughput_history[-5:]
+	predicted = sum(recent) / len(recent)
+	predicted = predicted * 0.7
+	chunks = [quality_bitrates]
+	for i in range(min(LOOKAHEAD - 1, len(upcoming))):
+		chunks.append(upcoming[i])
+	window = len(chunks)
+	# try all possible quality sequences
+	best_qoe = float('-inf')
+	best_quality = 0
+	for seq in itertools.product(range(quality_levels), repeat=window):
+		# simulate this sequence
+		buf = buffer_secs
+		total_qual = 0
+		total_var = 0
+		total_rebuf = 0
+		last_q = prev_quality
+		for i in range(len(seq)):
+			chunk_size = chunks[i][seq[i]]
+			download_time = chunk_size / predicted if predicted > 0 else float('inf')
+			# check for rebuffering
+			if download_time > buf:
+				total_rebuf += download_time - buf
+				buf = 0
+			else:
+				buf -= download_time
+			buf += chunk_duration
+			if buf > buffer_max:
+				buf = buffer_max
+			total_qual += seq[i]
+			total_var += abs(seq[i] - last_q)
+			last_q = seq[i]
+		# calculate QoE
+		qoe = (qual_coef * total_qual - var_coef * total_var - rebuf_coef * total_rebuf) / window
+		if qoe > best_qoe:
+			best_qoe = qoe
+			best_quality = seq[0]
+
+	prev_quality = best_quality
+	return best_quality

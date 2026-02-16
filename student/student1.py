@@ -62,6 +62,8 @@ class ClientMessage:
 # Your helper functions, variables, classes here. You may also write initialization routines to be called
 # when this script is first imported and anything else you wish.
 
+prev_quality = 0
+chunk_count = 0
 
 def student_entrypoint(client_message: ClientMessage):
 	"""
@@ -84,4 +86,36 @@ def student_entrypoint(client_message: ClientMessage):
 
 	:return: float Your quality choice. Must be one in the range [0 ... quality_levels - 1] inclusive.
 	"""
-	return 0  # Let's see what happens if we select the lowest bitrate every time
+	# return 0  # Let's see what happens if we select the lowest bitrate every time
+
+	global prev_quality, chunk_count
+
+	quality_levels = client_message.quality_levels
+	buffer_secs = client_message.buffer_seconds_until_empty
+	buffer_max = client_message.buffer_max_size
+	chunk_duration = client_message.buffer_seconds_per_chunk
+
+	# reservoir and cushion thresholds
+	reservoir = max(chunk_duration * 3, buffer_max * 0.10)
+	upper = buffer_max * 0.90
+	cushion = upper - reservoir
+	if cushion <= 0:
+		cushion = buffer_max * 0.5
+		reservoir = buffer_max * 0.1
+	# map buffer level to quality
+	if buffer_secs <= reservoir:
+		quality = 0
+	elif buffer_secs >= reservoir + cushion:
+		quality = quality_levels - 1
+	else:
+		frac = (buffer_secs - reservoir) / cushion
+		quality = int(frac * (quality_levels - 1))
+	if chunk_count == 0:
+		quality = 0
+	if buffer_secs < chunk_duration * 2:
+		quality = 0
+	# make sure quality is valid
+	quality = max(0, min(quality_levels - 1, quality))
+	prev_quality = quality
+	chunk_count += 1
+	return quality
