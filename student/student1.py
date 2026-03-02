@@ -62,8 +62,11 @@ class ClientMessage:
 # Your helper functions, variables, classes here. You may also write initialization routines to be called
 # when this script is first imported and anything else you wish.
 
-prev_quality = 0
-chunk_count = 0
+# Global state
+_in_startup = True 
+_prev_quality = 0 
+_throughput_history = []
+_chunk_count = 0
 
 def student_entrypoint(client_message: ClientMessage):
 	"""
@@ -88,34 +91,78 @@ def student_entrypoint(client_message: ClientMessage):
 	"""
 	# return 0  # Let's see what happens if we select the lowest bitrate every time
 
-	global prev_quality, chunk_count
+	global _in_startup, _prev_quality, _throughput_history, _chunk_count
 
-	quality_levels = client_message.quality_levels
-	buffer_secs = client_message.buffer_seconds_until_empty
-	buffer_max = client_message.buffer_max_size
-	chunk_duration = client_message.buffer_seconds_per_chunk
+	def _harmonic_mean(values):
+		positive = [v for v in values if v > 0]
+		if not positive:
+			return 0.0
+		return len(positive) / sum(1.0 / v for v in positive)
 
-	# reservoir and cushion thresholds
+	# Parameters
+	quality_levels   = client_message.quality_levels
+	quality_bitrates = client_message.quality_bitrates
+	buffer_secs      = client_message.buffer_seconds_until_empty
+	buffer_max       = client_message.buffer_max_size
+	chunk_duration   = client_message.buffer_seconds_per_chunk
+	throughput       = client_message.previous_throughput
+
+	# Throughput history
+	if _chunk_count > 0 and throughput > 0:
+		_throughput_history.append(throughput)
+
+	# Reservoir and cushion thresholds
 	reservoir = max(chunk_duration * 3, buffer_max * 0.10)
-	upper = buffer_max * 0.90
-	cushion = upper - reservoir
+	upper     = buffer_max * 0.90
+	cushion   = upper - reservoir
 	if cushion <= 0:
-		cushion = buffer_max * 0.5
-		reservoir = buffer_max * 0.1
-	# map buffer level to quality
-	if buffer_secs <= reservoir:
+		reservoir = buffer_max * 0.10
+		cushion   = buffer_max * 0.80
+
+	if _in_startup:
 		quality = 0
-	elif buffer_secs >= reservoir + cushion:
-		quality = quality_levels - 1
+		if _chunk_count != 0 and _throughput_history:
+			est_tp = _harmonic_mean(_throughput_history[-5:]) * 0.875
+			max_downloadable = est_tp * chunk_duration
+			for q in range(quality_levels):
+				if quality_bitrates[q] > max_downloadable:
+					break
+				quality = q
+		if buffer_secs >= reservoir and _chunk_count > 0:
+			_in_startup = False
 	else:
-		frac = (buffer_secs - reservoir) / cushion
-		quality = int(frac * (quality_levels - 1))
-	if chunk_count == 0:
+		# Buffer-to-rate map f(B)
+		rate_min = quality_bitrates[0]
+		rate_max = quality_bitrates[-1]
+		f_quality = 0
+		if buffer_secs >= reservoir + cushion:
+			f_quality = quality_levels - 1
+		elif buffer_secs > reservoir:
+			frac = (buffer_secs - reservoir) / cushion
+			target_rate = rate_min + frac * (rate_max - rate_min)
+			for q in range(quality_levels):
+				if quality_bitrates[q] > target_rate:
+					break
+				f_quality = q
+		# Apply rate limiter
+		if f_quality > _prev_quality:
+			quality = _prev_quality + 1
+			if _throughput_history:
+				recent = _throughput_history[-5:]
+				est_tp = _harmonic_mean(recent)
+				if quality_bitrates[_prev_quality + 1] > est_tp * chunk_duration:
+					quality -= 1
+		elif f_quality < _prev_quality:
+			quality = f_quality
+		else:
+			quality = _prev_quality
+
+	if buffer_secs < chunk_duration * 1.5: # Low buffer
 		quality = 0
-	if buffer_secs < chunk_duration * 2:
-		quality = 0
-	# make sure quality is valid
+	
 	quality = max(0, min(quality_levels - 1, quality))
-	prev_quality = quality
-	chunk_count += 1
+
+	# Update state
+	_prev_quality = quality
+	_chunk_count += 1
 	return quality
