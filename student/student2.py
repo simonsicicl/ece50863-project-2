@@ -64,9 +64,12 @@ class ClientMessage:
 
 import itertools
 
-LOOKAHEAD = 5  # chunks to look ahead
-throughput_history = []
-prev_quality = 0
+# Global state
+_throughput_history = []
+_prediction_errors = []
+_last_predicted = None
+_prev_quality = 0
+LOOKAHEAD = 5
 
 def student_entrypoint(client_message: ClientMessage):
 	"""
@@ -91,61 +94,73 @@ def student_entrypoint(client_message: ClientMessage):
 	"""
 	# return client_message.quality_levels - 1  # Let's see what happens if we select the highest bitrate every time
 
-	global throughput_history, prev_quality
+	global _throughput_history, _prediction_errors, _last_predicted, _prev_quality
 
-	quality_levels = client_message.quality_levels
-	buffer_secs = client_message.buffer_seconds_until_empty
-	buffer_max = client_message.buffer_max_size
-	chunk_duration = client_message.buffer_seconds_per_chunk
-	quality_bitrates = client_message.quality_bitrates
-	upcoming = client_message.upcoming_quality_bitrates
-	prev_throughput = client_message.previous_throughput
-	qual_coef = client_message.quality_coefficient
-	var_coef = client_message.variation_coefficient
-	rebuf_coef = client_message.rebuffering_coefficient
+	def _harmonic_mean(values):
+		positive = [v for v in values if v > 0]
+		if not positive:
+			return 0.0
+		return len(positive) / sum(1.0 / v for v in positive)
 
-	if prev_throughput > 0:
-		throughput_history.append(prev_throughput)
-	if len(throughput_history) == 0:
-		prev_quality = 0
+	# Parameters
+	quality_levels   	= client_message.quality_levels
+	quality_bitrates 	= client_message.quality_bitrates
+	upcoming         	= client_message.upcoming_quality_bitrates
+	buffer_secs     	= client_message.buffer_seconds_until_empty
+	buffer_max       	= client_message.buffer_max_size
+	chunk_duration   	= client_message.buffer_seconds_per_chunk
+	actual_tp        	= client_message.previous_throughput
+	qual_coef        	= client_message.quality_coefficient
+	var_coef         	= client_message.variation_coefficient
+	rebuf_coef       	= client_message.rebuffering_coefficient
+
+	# Record actual throughput and compute prediction error ratio
+	if actual_tp > 0:
+		_throughput_history.append(actual_tp)
+		# Error ratio: how much did we over-estimate last time?
+		if _last_predicted is not None:
+			_prediction_errors.append(_last_predicted / actual_tp)
+
+	# Fallback when not enough history yet
+	if not _throughput_history:
+		_last_predicted = None
+		_prev_quality = 0
 		return 0
-	recent = throughput_history[-5:]
-	predicted = sum(recent) / len(recent)
-	predicted = predicted * 0.7
-	chunks = [quality_bitrates]
-	for i in range(min(LOOKAHEAD - 1, len(upcoming))):
-		chunks.append(upcoming[i])
+
+	# RobustMPC throughput prediction
+	harmonic_tp = _harmonic_mean(_throughput_history[-5:])
+	max_error = max(_prediction_errors[-5:]) if _prediction_errors else 1.0
+	max_error = max(max_error, 1.0)
+	predicted = harmonic_tp / max_error
+	_last_predicted = predicted
+	chunks = [quality_bitrates] + [upcoming[i] for i in range(min(LOOKAHEAD - 1, len(upcoming)))]
 	window = len(chunks)
-	# try all possible quality sequences
-	best_qoe = float('-inf')
+
+	# Enumerate all quality sequences, pick the one with best QoE
+	best_qoe     = float('-inf')
 	best_quality = 0
 	for seq in itertools.product(range(quality_levels), repeat=window):
-		# simulate this sequence
 		buf = buffer_secs
 		total_qual = 0
 		total_var = 0
 		total_rebuf = 0
-		last_q = prev_quality
-		for i in range(len(seq)):
+		last_q = _prev_quality
+		for i in range(window):
 			chunk_size = chunks[i][seq[i]]
 			download_time = chunk_size / predicted if predicted > 0 else float('inf')
-			# check for rebuffering
 			if download_time > buf:
 				total_rebuf += download_time - buf
 				buf = 0
 			else:
 				buf -= download_time
-			buf += chunk_duration
-			if buf > buffer_max:
-				buf = buffer_max
+			buf = min(buf + chunk_duration, buffer_max)
 			total_qual += seq[i]
 			total_var += abs(seq[i] - last_q)
 			last_q = seq[i]
-		# calculate QoE
 		qoe = (qual_coef * total_qual - var_coef * total_var - rebuf_coef * total_rebuf) / window
 		if qoe > best_qoe:
 			best_qoe = qoe
 			best_quality = seq[0]
 
-	prev_quality = best_quality
+	_prev_quality = best_quality
 	return best_quality

@@ -100,12 +100,12 @@ def student_entrypoint(client_message: ClientMessage):
 		return len(positive) / sum(1.0 / v for v in positive)
 
 	# Parameters
-	quality_levels   = client_message.quality_levels
-	quality_bitrates = client_message.quality_bitrates
-	buffer_secs      = client_message.buffer_seconds_until_empty
-	buffer_max       = client_message.buffer_max_size
-	chunk_duration   = client_message.buffer_seconds_per_chunk
-	throughput       = client_message.previous_throughput
+	quality_levels   	= client_message.quality_levels
+	quality_bitrates 	= client_message.quality_bitrates
+	buffer_secs     	= client_message.buffer_seconds_until_empty
+	buffer_max       	= client_message.buffer_max_size
+	chunk_duration   	= client_message.buffer_seconds_per_chunk
+	throughput       	= client_message.previous_throughput
 
 	# Throughput history
 	if _chunk_count > 0 and throughput > 0:
